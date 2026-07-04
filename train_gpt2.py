@@ -428,5 +428,7 @@ for step in range(max_steps):
         with open(log_file, "a") as f:
             f.write(f"{step} train {loss.item():.6f}\n")
 
+print("Training complete!")
+
 if ddp:
     destroy_process_group()
