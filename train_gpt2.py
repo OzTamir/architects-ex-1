@@ -304,8 +304,8 @@ if torch.cuda.is_available():
 
 enc = tiktoken.get_encoding("gpt2")
 
-B = 4 # micro batch size
-T = 64 # sequence length
+B = 16 # micro batch size
+T = 1024 # sequence length
 
 train_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
 val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
@@ -319,7 +319,7 @@ model.to(device)
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
-max_steps = 100 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+max_steps = 500 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
@@ -345,18 +345,33 @@ with open(log_file, "w") as f: # open for writing to clear the file
     pass
 
 def validation_loop(step):
+    # Set the model to evaluation mode
     model.eval()
+
+    # Reset the validation loader to ensure that we use the same data for validation every time
     val_loader.reset()
+
     with torch.no_grad():
+        # Accumulate the loss over the validation steps
         val_loss_accum = 0.0
+        # Number of validation steps to average the loss over
         val_loss_steps = 20
         for _ in range(val_loss_steps):
+            # Get the next validation batch and move it to the GPU ("device")
             x, y = val_loader.next_batch()
             x, y = x.to(device), y.to(device)
-            logits, loss = model(x, y)
+
+            # Mixed precision - cast the forward pass to bfloat16
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                # Perform the forward pass and get the loss
+                logits, loss = model(x, y)
+            
+            # Average the loss over the validation steps
             loss = loss / val_loss_steps
+            # Accumulate the loss
             val_loss_accum += loss.detach()
     if master_process:
+        # Print to stdout and log file
         print(f"validation loss: {val_loss_accum.item():.4f}")
         with open(log_file, "a") as f:
             f.write(f"{step} val {val_loss_accum.item():.4f}\n")
@@ -365,7 +380,7 @@ for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
 
-    if step % 20 == 0 or last_step:
+    if step % 100 == 0 or last_step:
         validation_loop(step)
     
     # Set the model to training mode
@@ -378,8 +393,10 @@ for step in range(max_steps):
     # Zero the gradients
     optimizer.zero_grad()
 
-    # Perform the forward pass and get the loss
-    logits, loss = model(model_inputs, model_targets)
+    # Mixed precision - cast the forward pass to bfloat16
+    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+        # Perform the forward pass and get the loss
+        logits, loss = model(model_inputs, model_targets)
 
     # Backprop
     loss.backward()
