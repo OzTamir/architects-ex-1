@@ -344,13 +344,55 @@ log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
     pass
 
+def validation_loop(step):
+    model.eval()
+    val_loader.reset()
+    with torch.no_grad():
+        val_loss_accum = 0.0
+        val_loss_steps = 20
+        for _ in range(val_loss_steps):
+            x, y = val_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+            logits, loss = model(x, y)
+            loss = loss / val_loss_steps
+            val_loss_accum += loss.detach()
+    if master_process:
+        print(f"validation loss: {val_loss_accum.item():.4f}")
+        with open(log_file, "a") as f:
+            f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+
 for step in range(max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
 
+    if step % 20 == 0 or last_step:
+        validation_loop(step)
     
-    # TODO: Implement the training step
+    # Set the model to training mode
+    model.train()
+
+    # Get the next data batch and move it to the GPU ("device")
+    model_inputs, model_targets = train_loader.next_batch()
+    model_inputs, model_targets = model_inputs.to(device), model_targets.to(device)
+
+    # Zero the gradients
+    optimizer.zero_grad()
+
+    # Perform the forward pass and get the loss
+    logits, loss = model(model_inputs, model_targets)
+
+    # Backprop
+    loss.backward()
+
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     
+    # Update the learning rate - use Karpathy's decaying learning rate function
+    lr = get_lr(step)
+    for parameter_group in optimizer.param_groups:
+        parameter_group['lr'] = lr
+
+    # Update the model parameters
+    optimizer.step()
     
     if device_type == "cuda":
         torch.cuda.synchronize() # wait for the GPU to finish work
